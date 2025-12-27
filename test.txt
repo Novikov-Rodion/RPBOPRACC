@@ -1,2 +1,0 @@
-GOOGLE_API_KEY="AIzaSyA1234567890-AbcDefGhiJklMnoPqrstuv"
-GITHUB_TOKEN="ghp_1234567890abcdefghijklmnopqrstuvwxyzAB"
