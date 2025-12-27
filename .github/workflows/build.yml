@@ -1,0 +1,144 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build application
+        run: mvn clean package
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-artifact
+          path: target/*.jar
+
+  sast:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Semgrep
+        run: pipx install semgrep
+      - name: Run Semgrep
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+      - name: Upload SARIF
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
+
+  sca:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: maven:3.9.11-eclipse-temurin-21-alpine
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run OWASP
+        run: mvn -B org.owasp:dependency-check-maven:check -Dnvd.api.key=${{ secrets.NVD_API_KEY }}
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.html
+
+  dast-dynamic:
+    name: DAST Scan
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
+      actions: write
+      checks: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+          path: target
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Start Application
+        run: |
+          nohup java -jar target/*.jar &
+          sleep 30
+      - name: Fix permissions
+        run: chmod -R 777 .
+      - name: Create Empty Rules File
+        run: touch zap_rules.tsv && chmod 666 zap_rules.tsv
+      - name: Pull ZAP Image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+      - name: ZAP Baseline Scan
+        run: |
+          docker run --rm --network host --user root \
+            -v $(pwd):/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://localhost:8080 -r zap-baseline-report.html -I || true
+      - name: Upload Baseline Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-report
+          path: zap-baseline-report.html
+
+  docker-security-publish:
+    name: Docker Build, Scan and Push
+    runs-on: ubuntu-latest
+    needs: [sast, sca, dast-dynamic]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+          path: target
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+      - name: Build local image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:${{ github.sha }} .
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push Docker image
+        run: |
+          docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker tag ghcr.io/${{ github.repository }}:${{ github.sha }} ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
