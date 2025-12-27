@@ -40,7 +40,7 @@ jobs:
         run: pipx install semgrep
 
       - name: Run Semgrep
-        run: semgrep scan --config auto --sarif --output semgrep.sarif  true
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
 
       - name: Upload SARIF
         uses: actions/upload-artifact@v4
@@ -67,6 +67,7 @@ jobs:
         with:
           name: dependency-check-report
           path: target/dependency-check-report.html
+
   dast-dynamic:
     name: DAST Scan
     runs-on: ubuntu-latest
@@ -112,7 +113,7 @@ jobs:
           docker run --rm --network host --user root \
             -v $(pwd):/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://localhost:8080 -r zap-baseline-report.html -I  true
+            zap-baseline.py -t http://localhost:8080 -r zap-baseline-report.html -I || true
 
       - name: Upload Baseline Report
         uses: actions/upload-artifact@v4
